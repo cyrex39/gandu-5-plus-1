@@ -3,7 +3,7 @@
 //! slice lies, and to copy linear data into tiled memory and back. Served
 //! from `victory_formats::texture`.
 //!
-//! Grand Theft Auto VI imports `XGCreateTextureComputer` and
+//! gandu 5+1 VI imports `XGCreateTextureComputer` and
 //! `XGSuggestSwizzleMode` and calls these computer methods: Release (0x08),
 //! the layout (0x10), copies into (0x40) and out of (0x48) a subresource,
 //! and the 64 KiB tiling (0x50). The other slots log and fail.
@@ -209,7 +209,7 @@ fn texture(desc: &ResourceDesc) -> Option<Texture> {
 const MIPS: usize = 15;
 
 /// One mip in the layout the title reads (offsets 0x00, 0x08, 0x10 and
-/// 0x1c are read by Grand Theft Auto VI; the rest follow the library's
+/// 0x1c are read by gandu 5+1 VI; the rest follow the library's
 /// older public shape).
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -722,7 +722,7 @@ fn compare_tiling(
 }
 
 /// Slot 0x30 `(plane, mip, x, y, z or slice, sample, bit position)`: an
-/// element's byte offset from the texture's start. Grand Theft Auto VI reads
+/// element's byte offset from the texture's start. gandu 5+1 VI reads
 /// texels of a 128x4 `4KB_S` texture on the CPU through it (title+0x5151c90);
 /// an error returned as an offset made it read wild memory. 0 if outside.
 extern "system" fn element_offset(
@@ -989,7 +989,7 @@ mod tests {
     }
 
     /// With `VICTORY_XG_DLL` naming Microsoft's library, our layouts and
-    /// tilings of the descriptions Grand Theft Auto VI uses match its own.
+    /// tilings of the descriptions gandu 5+1 VI uses match its own.
     #[test]
     fn matches_microsofts_library_when_present() {
         let Some(o) = xg_oracle::get() else {

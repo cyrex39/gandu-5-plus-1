@@ -382,7 +382,7 @@ mod tests {
         assert!(layout_diffs(&a, &a.clone()).is_empty());
     }
 
-    /// The difference measured in Grand Theft Auto VI: tail mips of 64 KiB
+    /// The difference measured in gandu 5+1 VI: tail mips of 64 KiB
     /// textures, reported in their own mode with a position by the library.
     #[test]
     fn tail_mip_differences_are_named() {

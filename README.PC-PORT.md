@@ -1,8 +1,8 @@
-# GTA VI on PC (NVIDIA) — VIctory fork with our fixes
+# gandu 5+1 on PC (NVIDIA) — VIctory fork with our fixes
 
 This is a fork of [fxceless/victory-fork](https://github.com/fxceless/victory-fork)
 (which builds on [Marvisak/VIctory](https://github.com/Marvisak/VIctory)) carrying
-extra fixes for running the Xbox Series build of GTA VI on an **NVIDIA RTX 4080 +
+extra fixes for running the Xbox Series build of gandu 5+1 on an **NVIDIA RTX 4080 +
 AMD Ryzen 9 7900X3D** PC. **No game files, keys or assets are here.** You need your
 own copy of the game. Licensed GPL-3.0-or-later like upstream; see LICENSE and the
 credits at the bottom of the upstream README.
