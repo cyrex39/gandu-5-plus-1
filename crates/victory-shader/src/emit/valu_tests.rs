@@ -1758,7 +1758,7 @@ fn build_sampled_cs(body: &[u32], vgprs: u16) -> HostShader {
         stage: HwStage::Cs,
         dxil,
         user_data: l.user_data,
-        samplers: l.samplers,
+        samplers: l.samplers.iter().map(|&(w, _)| w).collect(),
         static_samplers: Vec::new(),
         root_cbvs: l.root_cbvs,
         root_srvs: l.root_srvs,
