@@ -7,6 +7,26 @@ AMD Ryzen 9 7900X3D** PC. **No game files, keys or assets are here.** You need y
 own copy of the game. Licensed GPL-3.0-or-later like upstream; see LICENSE and the
 credits at the bottom of the upstream README.
 
+## Known issues
+
+- **The mosaic texture issue is NVIDIA-specific.** On AMD Radeon GPUs the
+  Radeon-tuned lines (the `victory-world`/DexNom builds) show the world with
+  complete textures; on NVIDIA the same builds show blocky, mosaic-like light
+  and texture patches. Two causes are identified and fixed in this fork:
+  an indirect compute dispatch cut off at 65,535 groups (fixed by
+  **dispatches in parts**, below) and 84 texture descriptions laid out
+  differently from Microsoft's own library (fixed by the **exact XG texture
+  layout**, below). On AMD neither shows up the same way, because the AMD
+  lines carried these fixes first and AMD's driver is less strict about
+  wave64 compute pipelines. Remaining NVIDIA-side gaps: ~15 wave64 compute
+  pipelines the NVIDIA driver refuses (about 300 draws a frame) and 5
+  ray-structure-builder programs that need 64-lane waves, which NVIDIA GPUs
+  do not execute.
+- **Shadowed and indoor areas are black.** The title's ray-traced lighting
+  (bounce light, sun and lamp shadows) does not run yet on any GPU.
+- **Performance is far from the console.** See the table above; the
+  bottleneck is the translation layer's CPU-side memory copying, not the GPU.
+
 ## Measured results (2026-11-25, this machine)
 
 | Stage | World frame time | FPS |
