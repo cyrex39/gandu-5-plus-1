@@ -408,6 +408,7 @@ fn bench_indirect_draw_barriers() {
                     None,
                     (0, STEP, records),
                     window > 1,
+                    false,
                 ));
                 state = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
                 list.SetPipelineState(&pso);
