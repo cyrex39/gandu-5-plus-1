@@ -33,7 +33,20 @@ credits at the bottom of the upstream README.
 |---|---|---|
 | Upstream fork tip, defaults | 190–230 ms | 4.4–5.2 |
 | + speed switches (see launcher) | 140–173 ms | 5.8–7.1 (up to 14.7 in light rooms) |
-| + everything below | **102–147 ms** | **6.8–9.8** |
+| + everything below | 102–147 ms | 6.8–9.8 |
+| + rehash runs, window jump, page writes, async present | **97–113 ms** | **8.8–10.3** |
+
+Also measured and **worse** here (do not enable): `VICTORY_CARD_FETCH_INFLIGHT`,
+`VICTORY_VIEW_KNOWN`, `VICTORY_REFRESH_ONCE`, `VICTORY_SPREAD`, `VICTORY_QUEUE2=3`
+(124–171 ms).
+
+Profiling (the diagnostics build's sampling profiler): of a ~105 ms frame, the
+card's own lists take ~40 ms, the layer's CPU work the rest — dominated by
+kernel page queries and guarded-memory copies in the submit path
+(`watch::guard`→`VirtualQuery` ≈ 4 ms, guarded copies ≈ 4 ms, kernel
+copy/readback ≈ 4 ms), section map/unmap churn in the recording threads, and
+mutex contention on the submit queue. The GPU itself is nearly idle. The next
+30 fps step is upstream work on those paths, not a setting.
 
 Menus and cutscenes run at the game's native 30 fps. Full shader archive pre-warmed
 (25,696 of 25,993 translated; 297 refused) — `victory translate <game dir> --warm all --jobs 20`.
