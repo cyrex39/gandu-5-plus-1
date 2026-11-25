@@ -1656,6 +1656,91 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
+/// [`CARD_COMPARE`] with a group of 64 threads to a piece
+/// (`VICTORY_CARD_HASH_WIDE`, on by default; `=0` for the thread a piece).
+///
+/// With a thread a piece, a pass hashes its 64 KiB pieces in 4,096 steps
+/// one after the other, and its time is that of one piece however few
+/// pieces it has: the card waits on one load at a time and runs next to
+/// nothing else. The passes run before every submission's lists (hashes
+/// after ranges were sent up, 300 to 450 a frame) and after them (compares,
+/// about 100). Measured on an RTX 3060 in the first rooms with the frame
+/// rate switches on: the card was 85 % busy, and "our send-and-hash lists"
+/// were 23 to 29 ms of its frame.
+///
+/// Here thread `t` of a piece's group hashes the 16-byte steps `t`, `t +
+/// 64`, `t + 128`... of the piece (neighbouring threads read neighbouring
+/// bytes), and the first thread folds the 64 lane hashes in lane order into
+/// the piece's hash. It is another hash than [`CARD_COMPARE`]'s, so one
+/// process uses one of them for every hash it stores and compares (it is
+/// chosen once). Copies are under 1 GiB (`shadow::card_for`): at most
+/// 16,385 pieces, one group each, within a dispatch's 65,535.
+pub(crate) const CARD_COMPARE_WIDE: &str = r#"
+#define RS "RootConstants(num32BitConstants=6, b0), SRV(t0), UAV(u0), UAV(u1)"
+cbuffer Span : register(b0) {
+    uint first;    // the first piece
+    uint skew;     // where the copy starts in its piece 0
+    uint size;     // the copy's buffer, in bytes (a multiple of 64 KiB)
+    uint pieces;
+    uint out_at;   // the first piece's dword in `differs`, in bytes
+    uint compare;  // 0: the hashes are stored; else compared with those stored (2: and then stored)
+};
+ByteAddressBuffer now : register(t0);
+RWByteAddressBuffer hashes : register(u0);
+RWByteAddressBuffer differs : register(u1);
+groupshared uint4 lanes[64];
+[RootSignature(RS)]
+[numthreads(64, 1, 1)]
+void main(uint3 group : SV_GroupID, uint t : SV_GroupIndex) {
+    uint i = group.x;
+    if (i >= pieces) return;
+    uint piece = first + i;
+    uint lo = piece * 65536u;
+    lo = lo > skew ? lo - skew : 0u;
+    uint hi = min((piece + 1u) * 65536u - skew, size);
+    lo = lo & ~15u;
+    hi = (hi + 15u) & ~15u;
+    uint4 h = uint4(0x9E3779B9u, 0x85EBCA6Bu, 0xC2B2AE35u, 0x27D4EB2Fu) ^ t;
+    [loop]
+    for (uint at = lo + t * 16u; at < hi; at += 1024u) {
+        h = (h ^ now.Load4(at)) * uint4(0x01000193u, 0x9E3779B1u, 0x85EBCA77u, 0xC2B2AE3Du);
+        h = h.yzwx ^ (h >> 15);
+    }
+    lanes[t] = h;
+    GroupMemoryBarrierWithGroupSync();
+    if (t != 0u) return;
+    uint4 all = uint4(0x27D4EB2Fu, 0x165667B1u, 0xD3A2646Cu, 0xFD7046C5u);
+    [loop]
+    for (uint k = 0u; k < 64u; k++) {
+        all = (all ^ lanes[k]) * uint4(0x01000193u, 0x9E3779B1u, 0x85EBCA77u, 0xC2B2AE3Du);
+        all = all.yzwx ^ (all >> 15);
+    }
+    if (compare != 0u) {
+        differs.Store(out_at + i * 4u, any(all != hashes.Load4(piece * 16u)) ? 1u : 0u);
+        if (compare == 2u) hashes.Store4(piece * 16u, all);
+    } else {
+        hashes.Store4(piece * 16u, all);
+    }
+}
+"#;
+
+/// Whether [`CARD_COMPARE_WIDE`] is the compare (`VICTORY_CARD_HASH_WIDE`;
+/// on unless `0`). Chosen once: stored and compared hashes must agree.
+pub(crate) fn card_hash_wide() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_HASH_WIDE").is_none_or(|v| v != "0"))
+}
+
+/// The compare's source for this process ([`card_hash_wide`]).
+pub(crate) fn card_compare_source() -> &'static str {
+    if card_hash_wide() { CARD_COMPARE_WIDE } else { CARD_COMPARE }
+}
+
+/// The groups a compare pass over `pieces` pieces is dispatched with.
+pub(crate) fn card_compare_groups(pieces: u32) -> u32 {
+    if card_hash_wide() { pieces } else { pieces.div_ceil(64) }
+}
+
 /// Whether the pieces a flight's compare flags come down to the PC inside
 /// the flight itself (`VICTORY_CARD_FETCH_INFLIGHT=1`; off by default, and
 /// only with [`relay`]).
@@ -1958,6 +2043,26 @@ impl Deferred {
         ALIVE[7].fetch_add(size, Ordering::Relaxed);
         self.upload_bytes += size;
         self.uploads.push(buffer);
+    }
+
+    /// Empties the recording for the list's next use, keeping the capacity
+    /// of every collection (a reset is per submission, and the sets and
+    /// vectors grow back the same way every time). The same state
+    /// [`Deferred::default`] gives, so nothing leaks across resets: the
+    /// held uploads pass out of [`ALIVE`] as they would when dropped.
+    fn clear(&mut self) {
+        ALIVE[6].fetch_sub(self.uploads.len() as u64, Ordering::Relaxed);
+        ALIVE[7].fetch_sub(self.upload_bytes, Ordering::Relaxed);
+        self.copies.clear();
+        self.uploads.clear();
+        self.upload_bytes = 0;
+        self.kept.clear();
+        self.refreshed.clear();
+        self.textures.clear();
+        self.writes.clear();
+        self.backs.clear();
+        self.budget_zeroed = false;
+        self.indirect_readable = 0;
     }
 }
 
@@ -3922,9 +4027,10 @@ impl Host {
         // SAFETY: the source and names live through the call; the out
         // pointer is ours.
         unsafe {
+            let source = card_compare_source();
             D3DCompile(
-                CARD_COMPARE.as_ptr().cast(),
-                CARD_COMPARE.len(),
+                source.as_ptr().cast(),
+                source.len(),
                 windows::core::s!("card compare"),
                 None,
                 None,
@@ -4242,7 +4348,7 @@ impl Host {
                         for run in runs {
                             let constants = [run.first, run.skew, size as u32, run.pieces, 0, 0];
                             list.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
-                            list.Dispatch(run.pieces.div_ceil(64), 1, 1);
+                            list.Dispatch(card_compare_groups(run.pieces), 1, 1);
                         }
                     }
                     crate::cardmeter::end(list, timed);
@@ -4333,7 +4439,7 @@ impl Host {
                         list.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
                         list.SetComputeRootShaderResourceView(1, r.shadow.buffer.GetGPUVirtualAddress());
                         list.SetComputeRootUnorderedAccessView(2, before.GetGPUVirtualAddress());
-                        list.Dispatch(r.span.pieces.div_ceil(64), 1, 1);
+                        list.Dispatch(card_compare_groups(r.span.pieces), 1, 1);
                         CARD_PASSES[2].fetch_add(1, Ordering::Relaxed);
                     }
                     // The fetch inside the flight (`inflight_fetch`): behind
@@ -6014,7 +6120,7 @@ impl HostList {
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
         self._alive.used();
-        *self.deferred() = Deferred::default();
+        self.deferred().clear();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -7279,7 +7385,7 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
     let moved = std::time::Instant::now();
     // Into host memory: in place first, if asked for (`crate::plaincopy`);
     // through the kernel if that is off or met a page that was not there.
-    let whole = (!title_dst && crate::plaincopy::copy(dst, src, len)) || read(src, dst, len);
+    let whole = (!title_dst && crate::plaincopy::copy_buffer(dst, src, len)) || read(src, dst, len);
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::MoveUs, moved.elapsed().as_micros() as u64);
     if whole {
@@ -7364,12 +7470,32 @@ pub(crate) fn read_into(src: *const u8, dst: &mut [u8]) -> bool {
     crate::plaincopy::copy(dst.as_mut_ptr(), src, dst.len()) || read(src, dst.as_mut_ptr(), dst.len())
 }
 
+/// Reads title memory at `src` into `dst`; false if a page of it is not
+/// readable. For bytes that are all real, however few: no
+/// [`crate::plaincopy`] floor.
+pub(crate) fn read_buffer_into(src: *const u8, dst: &mut [u8]) -> bool {
+    // In place first, if asked for (`crate::plaincopy`): the destination is
+    // memory of ours, as in `copy_mapped`.
+    crate::plaincopy::copy_buffer(dst.as_mut_ptr(), src, dst.len()) || read(src, dst.as_mut_ptr(), dst.len())
+}
+
 /// Copies `len` bytes from `src` to `dst` unless a source page is not
 /// readable.
 fn read(src: *const u8, dst: *mut u8, len: usize) -> bool {
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     let mut done = 0;
+    if direct_writes() {
+        // SAFETY: the destination is mapped writable memory of `len` bytes;
+        // the kernel checks the source. A short or partial read returns a
+        // negative status (`STATUS_PARTIAL_COPY`), which leaves the piece
+        // walk in `read_pieces` to zero what cannot be read; `done == len`
+        // keeps that true of a success that is somehow short.
+        let status = unsafe {
+            NtReadVirtualMemory(GetCurrentProcess(), src.cast(), dst.cast(), len, &mut done)
+        };
+        return status >= 0 && done == len;
+    }
     // SAFETY: the destination is mapped writable memory of `len` bytes; the
     // kernel checks the source.
     unsafe { ReadProcessMemory(GetCurrentProcess(), src.cast(), dst.cast(), len, &mut done) != 0 }
@@ -7387,6 +7513,18 @@ unsafe extern "system" {
         size: usize,
         written: *mut usize,
     ) -> i32;
+
+    /// The kernel's read from a process's memory, `(process, address,
+    /// bytes, length, read out)`: an NTSTATUS, negative when a page of the
+    /// range is not there or not readable (`STATUS_PARTIAL_COPY` when only
+    /// part of it is). It changes no protection.
+    fn NtReadVirtualMemory(
+        process: *mut std::ffi::c_void,
+        base: *const std::ffi::c_void,
+        buffer: *mut std::ffi::c_void,
+        size: usize,
+        read: *mut usize,
+    ) -> i32;
 }
 
 /// Whether title memory is written with the kernel's own call
@@ -7394,7 +7532,9 @@ unsafe extern "system" {
 /// what the pages are (as `VirtualQuery` does: about 2 ms a call in the
 /// title's big pools, see [`copy_mapped`]): putting back what shaders wrote
 /// cost 1.2-1.9 s a frame for 430-800 pieces, 2 ms each whatever their size
-/// (run 24). On by default; `VICTORY_DIRECT_WRITES=0` writes as before.
+/// (run 24). The same switch reads with `NtReadVirtualMemory`, as
+/// `ReadProcessMemory` asks the same question. On by default;
+/// `VICTORY_DIRECT_WRITES=0` writes and reads as before.
 fn direct_writes() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_DIRECT_WRITES").is_none_or(|v| v != "0"))
@@ -7421,7 +7561,7 @@ pub(crate) fn write_mapped(dst: *mut u8, src: *const u8, len: usize) {
         // destination.
         unsafe { WriteProcessMemory(GetCurrentProcess(), at as _, from.cast(), n, &mut done) != 0 }
     };
-    if len == 0 || write(dst as usize, len) {
+    if len == 0 || crate::plaincopy::write(dst, src, len) || write(dst as usize, len) {
         return;
     }
     for_pieces(dst as usize, len, 64 << 10, |at, n| {
