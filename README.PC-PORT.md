@@ -12,16 +12,26 @@ credits at the bottom of the upstream README.
 - **The mosaic texture issue is NVIDIA-specific.** On AMD Radeon GPUs the
   Radeon-tuned lines (the `victory-world`/DexNom builds) show the world with
   complete textures; on NVIDIA the same builds show blocky, mosaic-like light
-  and texture patches. Two causes are identified and fixed in this fork:
+  and texture patches. Three causes are identified and fixed in this fork:
   an indirect compute dispatch cut off at 65,535 groups (fixed by
-  **dispatches in parts**, below) and 84 texture descriptions laid out
+  **dispatches in parts**, below), 84 texture descriptions laid out
   differently from Microsoft's own library (fixed by the **exact XG texture
-  layout**, below). On AMD neither shows up the same way, because the AMD
-  lines carried these fixes first and AMD's driver is less strict about
-  wave64 compute pipelines. Remaining NVIDIA-side gaps: ~15 wave64 compute
-  pipelines the NVIDIA driver refuses (about 300 draws a frame) and 5
-  ray-structure-builder programs that need 64-lane waves, which NVIDIA GPUs
-  do not execute.
+  layout**, below), and the clean-up passes this translator runs over its own
+  DXIL, which NVIDIA's compiler folds into visible black blocks — upstream
+  issue #310 reports the same scene rendering clean with
+  `VICTORY_SHADER_OPT=0` at the same frame rate, and the launcher now sets it
+  (not yet re-measured on this machine). On AMD none of these show up the
+  same way, because the AMD lines carried the first two fixes first and AMD's
+  compiler is less strict about wave64 compute pipelines. Remaining
+  NVIDIA-side gaps: ~15 wave64 compute pipelines the NVIDIA driver refuses
+  (about 300 draws a frame) and 5 ray-structure-builder programs that need
+  64-lane waves, which NVIDIA GPUs do not execute.
+- **Textures arrive slowly while the world streams in.** Thousands of slots
+  wait for the card's room and slots whose pages are not mapped yet are
+  skipped until something asks for them again. Two upstream texture-queue
+  changes are taken in this fork: slots without memory are looked at again
+  for up to 20 s (upstream PR #1246), and a bake draw's own textures are
+  uploaded before the draw runs (upstream PR #1264).
 - **Shadowed and indoor areas are black.** The title's ray-traced lighting
   (bounce light, sun and lamp shadows) does not run yet on any GPU.
 - **Performance is far from the console.** See the table above; the
